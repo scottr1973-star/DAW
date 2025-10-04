@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-<title>FlowDAW Studio — Looper12 + Drum Kits + Live Export</title>
+<title>FlowDAW Studio — Looper12 + Kits + Save/Load + MIDI</title>
 <style>
 :root{
   --bg:#0c0f11; --panel:#11171a; --ink:#e6f1ef; --muted:#9eb2ab; --line:rgba(255,255,255,.12);
@@ -73,6 +73,7 @@ h1{margin:10px 0 8px;font-size:18px}
 #kitEditor th{color:var(--muted);text-align:left}
 #kitEditor input[type="text"]{width:100%;padding:6px 8px}
 #kitEditor .playBtn{padding:4px 8px}
+#kitEditor .playBtn:focus{outline:none}
 #kitName{width:220px}
 
 /* Popups (draggable + resizable) */
@@ -132,7 +133,7 @@ h1{margin:10px 0 8px;font-size:18px}
 </head>
 <body>
 <div class="wrap">
-  <h1>FlowDAW Studio <span class="badge">Looper12 + kits + live export</span></h1>
+  <h1>FlowDAW Studio <span class="badge">Looper12 • Kits • Save/Load • MIDI</span></h1>
 
   <!-- Transport -->
   <div class="card">
@@ -249,7 +250,7 @@ h1{margin:10px 0 8px;font-size:18px}
       <h4>Equalizer</h4>
       <div class="fxgrid">
         <div><div class="label">Low (Hz)</div><input id="eqLowF" class="num" type="number" value="120"/><div class="label">Gain</div><input id="eqLowG" type="range" class="slider" min="-12" max="12" step="0.1" value="0"/></div>
-        <div><div class="label">Mid (Hz)</div><input id="eqMidF" class="num" type="number" value="1000"/><div class="label">Gain</div><input id="eqMidG" type="range" class="slider" min="-12" max="12" step="0.1" value="0"/></div>
+        <div><div class="label">Mid ( Hz )</div><input id="eqMidF" class="num" type="number" value="1000"/><div class="label">Gain</div><input id="eqMidG" type="range" class="slider" min="-12" max="12" step="0.1" value="0"/></div>
         <div><div class="label">High (Hz)</div><input id="eqHighF" class="num" type="number" value="6000"/><div class="label">Gain</div><input id="eqHighG" type="range" class="slider" min="-12" max="12" step="0.1" value="0"/></div>
         <div><div class="label">Q</div><input id="eqQ" type="range" class="slider" min="0.1" max="18" step="0.1" value="1"/></div>
       </div>
@@ -366,7 +367,7 @@ h1{margin:10px 0 8px;font-size:18px}
 <script>
 /* ====================== Utility ====================== */
 const AC = window.AudioContext || window.webkitAudioContext;
-let ctx=null, playing=false, startAt=0, metInt=null;
+let ctx=null, playing=false, startAt=0;
 const $ = s => document.querySelector(s);
 const $$ = s => Array.from(document.querySelectorAll(s));
 function toast(msg,ms=1600){ const t=$("#toastDAW"); t.textContent=msg; t.classList.add("show"); setTimeout(()=>t.classList.remove("show"),ms); }
@@ -447,13 +448,16 @@ function downloadBlob(blob, name){ const a=document.createElement('a'); a.href=U
 
 /* ====================== Project/Transport ====================== */
 let zoom=1.0, playheadPx=0; const basePPB=64;
-const project={tempo:120,timesig:"4/4",snap:"1/4",tracks:[],lengthBeats:64};
+const project={tempo:120,timesig:"4/4",snap:"1/4",tracks:[],lengthBeats:64, drumKit:null};
 let tid=1,cid=1; let selectedTrackId=null;
 let masterBus=null, masterAnalyser=null, mediaDest=null;
 
 /* Mic / monitor shared */
 let mediaStream=null, inputSrc=null, inputGain=null, inputAnalyser=null;
 let monitorOn=false;
+
+/* MIDI */
+let midiEnabled=false, midiAccess=null, midiInputs=[], midiUnsubs=[];
 
 /* Drum Kit state */
 const DEFAULT_PAD_NAMES=["Kick","Snare","CHat","OHat","Tom1","Tom2","Crash","Ride","Clap","Rim","Tom3","Tom4","Clave","Bongo","Conga","Cabasa"];
@@ -466,7 +470,10 @@ let currentKit = {
 const btnEnable=$("#enable"), btnPlay=$("#play"), btnStop=$("#stop"), btnRec=$("#rec"), lblClock=$("#clock");
 const tempo=$("#tempo"), timesig=$("#timesig"), snap=$("#snap"), btnMet=$("#met");
 const monitorBtn=$("#monitor"), inMF=$("#inMF");
+const saveBtn=$("#save"), loadBtn=$("#load"), loadFile=$("#loadFile");
+const midiBtn=$("#midi"), midiStatus=$("#midiStatus");
 
+/* Helpers */
 function parseTS(ts){ const [n,d]=ts.split('/').map(Number); return {num:n||4, den:d||4}; }
 function spb(){ return 60/project.tempo; }
 function beatsToPx(b){ return b*basePPB*zoom; }
@@ -474,8 +481,28 @@ function pxToBeats(px){ return px/(basePPB*zoom); }
 function snapBeats(v){ const map={"1/1":1,"1/2":0.5,"1/4":0.25,"1/8":0.125,"1/16":0.0625,"1/32":0.03125}; const inc=map[project.snap]||0.25; return Math.round(v/inc)*inc; }
 function fmtTime(sec){ const ms=Math.floor((sec*1000)%1000).toString().padStart(3,'0'); const mm=Math.floor(sec/60).toString().padStart(2,'0'); const ss=Math.floor(sec%60).toString().padStart(2,'0'); const beats=sec/spb(); const tsn=parseTS(project.timesig).num; const bar=Math.floor(beats/tsn)+1; const beat=Math.floor(beats%tsn)+1; const ticks=Math.floor((beats%1)*1000).toString().padStart(3,'0'); return `${mm}:${ss}.${ms} | ${bar}:${beat}:${ticks}`; }
 
-/* Enable */
-btnEnable.onclick=async ()=>{ if(!ctx){ ctx=new AC(); } await ctx.resume(); ensureMaster(); btnPlay.disabled=false; btnStop.disabled=false; btnRec.disabled=false; populateLiveTypes(); toast("Audio enabled"); };
+/* Enable (unlock + mic permission + analyser ready) */
+btnEnable.onclick=async ()=>{
+  try{
+    if(!ctx){ ctx=new AC(); }
+    // unlock
+    const unlock = ctx.createBuffer(1, 1, ctx.sampleRate);
+    const src = ctx.createBufferSource(); src.buffer = unlock;
+    src.connect(ctx.destination); src.start(0); src.stop(0);
+    await ctx.resume();
+    ensureMaster();
+    // request mic now so input meter works even with monitor off
+    await ensureInputNodes(true);
+    btnPlay.disabled=false; btnStop.disabled=false; btnRec.disabled=false;
+    populateLiveTypes();
+    btnEnable.textContent='Audio Enabled';
+    btnEnable.disabled=true;
+    toast("Audio enabled (mic ready)");
+  }catch(e){
+    console.error(e);
+    toast("Could not enable audio. Check browser autoplay/mic permissions.");
+  }
+};
 
 /* Play/Stop */
 btnPlay.onclick=async ()=>{ if(!ctx){ ctx=new AC(); } await ctx.resume(); playing=true; startAt = ctx.currentTime - (pxToBeats(playheadPx)*spb()); startSchedule(); };
@@ -489,27 +516,31 @@ snap.onchange=()=>{ project.snap=snap.value; drawRuler(); };
 function beep(){ if(!ctx) return; const o=ctx.createOscillator(), g=ctx.createGain(); o.frequency.value=1000; g.gain.value=.15; o.connect(g).connect(ctx.destination); o.start(); o.stop(ctx.currentTime+0.04); }
 
 /* Monitor */
-monitorBtn.onclick = async ()=>{ await ensureInputNodes(); monitorOn=!monitorOn; monitorBtn.textContent=monitorOn?"Monitor: ON":"Monitor: OFF"; monitorBtn.classList.toggle('primary', monitorOn); updateMonitorRouting(); toast(monitorOn?"Input monitor ON":"Input monitor OFF"); };
-async function ensureInputNodes(){
+monitorBtn.onclick = async ()=>{ await ensureInputNodes(true); monitorOn=!monitorOn; monitorBtn.textContent=monitorOn?"Monitor: ON":"Monitor: OFF"; monitorBtn.classList.toggle('primary', monitorOn); updateMonitorRouting(); toast(monitorOn?"Input monitor ON":"Input monitor OFF"); };
+async function ensureInputNodes(requestPermission=false){
   if(!ctx){ ctx=new AC(); await ctx.resume(); }
-  if(!mediaStream){ try{ mediaStream = await navigator.mediaDevices.getUserMedia({audio:true}); }catch(e){ toast('Mic access denied'); return; } }
-  if(!inputSrc){
+  if(!mediaStream && requestPermission){
+    try{ mediaStream = await navigator.mediaDevices.getUserMedia({audio:true}); }
+    catch(e){ toast('Mic access denied'); return false; }
+  }
+  if(mediaStream && !inputSrc){
     inputSrc = ctx.createMediaStreamSource(mediaStream);
     inputGain = ctx.createGain(); inputGain.gain.value = 1.0;
     inputAnalyser = ctx.createAnalyser(); inputAnalyser.fftSize=512; inputAnalyser.smoothingTimeConstant=0.85;
     inputSrc.connect(inputGain); inputGain.connect(inputAnalyser);
   }
+  return !!mediaStream;
 }
 function updateMonitorRouting(){
-  // disconnect any previous
   try{ inputGain?.disconnect(); }catch{}
-  if(!monitorOn || !inputGain) return;
-  // If any armed tracks exist, route to them; else route to master
+  if(!inputGain) return;
+  inputGain.connect(inputAnalyser);
   const armed = project.tracks.filter(t=>t.arm);
+  if(monitorOn){
+    inputGain.connect(masterBus);
+  }
   if(armed.length){
     armed.forEach(t=>{ const n=ensureAudio(t); try{ inputGain.connect(n.input); }catch{} });
-  }else{
-    try{ inputGain.connect(masterBus); }catch{}
   }
 }
 
@@ -596,8 +627,23 @@ window.addEventListener("mouseup", ()=>{
 /* ====================== Mixer / Tracks ====================== */
 const mixer=$("#mixer");
 function addTrack(kind="audio"){
-  const t={id:"t"+(tid++), type:kind, title:(kind==="drum"?"Drum":"Track")+" "+tid, color:"#29b6f6", arm:false, mute:false, solo:false, vol:0.85, pan:0,
-    fx:{bypass:false, eq:{lowF:120,lowG:0,midF:1000,midG:0,highF:6000,highG:0,q:1}, dly:{time:0.28,fb:0.25,mix:0}, rvb:{size:0.4,mix:0}, cmp:{thr:-24,rat:3,makeup:0}, ph:{rate:0.5,depth:0.6,fb:0.2,mix:0}}, clips:[] };
+  const t={
+    id:"t"+(tid++),
+    type:kind,
+    title:(kind==="drum"?"Drum":"Track")+" "+tid,
+    color:"#29b6f6",
+    arm:false, mute:false, solo:false,
+    vol:0.85, pan:0,
+    fx:{
+      bypass:false,
+      eq:{lowF:120,lowG:0,midF:1000,midG:0,highF:6000,highG:0,q:1},
+      dly:{time:0.28,fb:0.25,mix:0},
+      rvb:{size:0.4,mix:0},          /* ← fixed = to : */
+      cmp:{thr:-24,rat:3,makeup:0},
+      ph:{rate:0.5,depth:0.6,fb:0.2,mix:0}
+    },
+    clips:[]
+  };
   project.tracks.push(t); renderMixer(); layout(); if(kind==="drum") $("#drumPanel").style.display="block"; if(!selectedTrackId) selectTrack(t.id);
 }
 $("#addAudio").onclick=()=>addTrack("audio"); $("#addDrum").onclick=()=>addTrack("drum"); $("#addInst").onclick=()=>addTrack("inst");
@@ -817,7 +863,75 @@ fileIn.onchange=e=>{ [...e.target.files].forEach(f=>importAudio(f)); };
 drop.addEventListener("drop", e=>{ const files=[...e.dataTransfer.files].filter(f=>f.type.startsWith("audio/")); files.forEach(importAudio); });
 async function importAudio(file){ if(!ctx){ ctx=new AC(); await ctx.resume(); } const ab=await file.arrayBuffer(); const buf=await ctx.decodeAudioData(ab); let t=project.tracks.find(x=>x.type==="audio"); if(!t){ addTrack("audio"); t=project.tracks.find(x=>x.type==="audio"); } const beatsDur=buf.duration/spb(); const c={id:"c"+(cid++), start:0, dur:Math.max(0.5, beatsDur), name:file.name, buffer:buf}; t.clips.push(c); layout(); toast(`Imported ${file.name}`); }
 
-/* ====================== DRUM PADS + KIT (same as last build) ====================== */
+/* ====================== SAVE / LOAD (Project JSON with embedded WAV) ====================== */
+saveBtn.onclick=async ()=>{
+  const payload = await serializeProject();
+  const blob = new Blob([JSON.stringify(payload)], {type:'application/json'});
+  downloadBlob(blob, (payload.meta?.name||'FlowDAW_Project')+'.json');
+  toast('Project saved');
+};
+loadBtn.onclick=()=> loadFile.click();
+loadFile.onchange=async (e)=>{
+  const f=e.target.files[0]; if(!f) return;
+  let obj=null; try{ obj=JSON.parse(await f.text()); }catch{ toast('Invalid project file'); return; }
+  await restoreProject(obj);
+  toast('Project loaded');
+};
+async function serializeProject(){
+  const clips = [];
+  for(const t of project.tracks){
+    for(const c of t.clips){
+      const wav = c.buffer ? await bufferToBase64Wav(c.buffer) : null;
+      clips.push({id:c.id, tid:t.id, name:c.name, start:c.start, dur:c.dur, wav});
+    }
+  }
+  const kit = await serializeKit();
+  return {
+    meta:{version:1, name:'FlowDAW_'+new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')},
+    tempo:project.tempo, timesig:project.timesig, snap:project.snap, lengthBeats:project.lengthBeats,
+    tracks: project.tracks.map(t=>({id:t.id,type:t.type,title:t.title,color:t.color,arm:false,mute:false,solo:false,vol:t.vol,pan:t.pan,fx:t.fx})),
+    clips, kit
+  };
+}
+async function restoreProject(obj){
+  // reset
+  project.tempo=obj.tempo||120; project.timesig=obj.timesig||"4/4"; project.snap=obj.snap||"1/4"; project.lengthBeats=obj.lengthBeats||64;
+  tempo.value=project.tempo; timesig.value=project.timesig; snap.value=project.snap;
+  project.tracks=[]; audioMap.clear(); mixer.innerHTML=''; gridArea.innerHTML='';
+  tid=1; cid=1; selectedTrackId=null;
+  (obj.tracks||[]).forEach(t=>{ project.tracks.push({...t}); });
+  renderMixer(); layout();
+  // clips
+  if(obj.clips){
+    for(const c of obj.clips){
+      const t = project.tracks.find(x=>x.id===c.tid); if(!t) continue;
+      const clip={id:c.id, start:c.start, dur:c.dur, name:c.name, buffer:null};
+      if(c.wav){ clip.buffer = await base64WavToBuffer(c.wav); }
+      t.clips.push(clip);
+    }
+  }
+  layout();
+  // kit
+  if(obj.kit){ await restoreKit(obj.kit); $("#drumPanel").style.display="block"; }
+}
+/* Kit (de)serialize */
+async function serializeKit(){
+  return {
+    name: currentKit.name,
+    pads: await Promise.all(currentKit.pads.map(async p=>({ name:p.name, wav: p.buffer ? await bufferToBase64Wav(p.buffer) : null })))
+  };
+}
+async function restoreKit(obj){
+  currentKit.name = obj.name || "Loaded Kit";
+  for(let i=0;i<16;i++){
+    const pad=obj.pads?.[i];
+    currentKit.pads[i].name = pad?.name || DEFAULT_PAD_NAMES[i];
+    currentKit.pads[i].buffer = pad?.wav ? await base64WavToBuffer(pad.wav) : null;
+  }
+  buildPads();
+}
+
+/* ====================== DRUM PADS + KIT ====================== */
 const padgrid=$("#padgrid");
 function buildPads(){
   padgrid.innerHTML="";
@@ -831,18 +945,17 @@ function buildPads(){
   }
   rebuildKitEditor();
 }
-async function triggerPad(i){
+async function triggerPad(i, velocity=1){
   if(!ctx){ ctx=new AC(); await ctx.resume(); }
   const sample = currentKit.pads[i].buffer;
+  const gainVal = clamp(velocity, 0.05, 1);
+  const t = project.tracks.find(x=>x.type==="drum") || project.tracks.find(x=>x.type==="inst") || project.tracks[0];
+  const n = t ? ensureAudio(t) : {input:masterBus};
   if(sample){
-    const t = project.tracks.find(x=>x.type==="drum") || project.tracks.find(x=>x.type==="inst") || project.tracks[0];
-    const n = t ? ensureAudio(t) : {input:masterBus};
-    const src = ctx.createBufferSource(); src.buffer = sample; src.connect(n.input); src.start();
+    const src = ctx.createBufferSource(); src.buffer = sample;
+    const g = ctx.createGain(); g.gain.value=gainVal; src.connect(g).connect(n.input); src.start();
   }else{
-    // fallback blip
-    const t = project.tracks.find(x=>x.type==="drum") || project.tracks.find(x=>x.type==="inst") || project.tracks[0];
-    const n = t ? ensureAudio(t) : {input:masterBus};
-    const o=ctx.createOscillator(), g=ctx.createGain(); o.type="sine"; o.frequency.value=160 - i*4; g.gain.value=.6; o.connect(g).connect(n.input);
+    const o=ctx.createOscillator(), g=ctx.createGain(); o.type="sine"; o.frequency.value=160 - i*4; g.gain.value=.6*gainVal; o.connect(g).connect(n.input);
     const now=ctx.currentTime; o.start(); o.frequency.exponentialRampToValueAtTime(30, now+0.12); g.gain.exponentialRampToValueAtTime(0.0001, now+0.14); o.stop(now+0.15);
   }
 }
@@ -879,7 +992,7 @@ function rebuildKitEditor(){
 }
 function formatLen(sec){ return (sec>=1 ? sec.toFixed(2)+'s' : Math.round(sec*1000)+'ms'); }
 async function fileToBuffer(file){ const ab=await file.arrayBuffer(); if(!ctx){ ctx=new AC(); await ctx.resume(); } return await ctx.decodeAudioData(ab); }
-/* Kit save/load */
+/* Kit save/load (standalone) */
 saveKitBtn.onclick=async ()=>{
   currentKit.name = kitName.value || "My Kit";
   const payload = { name: currentKit.name, pads: await Promise.all(currentKit.pads.map(async (p)=>({ name:p.name, wav: p.buffer ? await bufferToBase64Wav(p.buffer) : null }))) };
@@ -892,12 +1005,7 @@ loadKitFile.onchange=async (e)=>{
   const f=e.target.files[0]; if(!f) return; const txt=await f.text().catch(()=>null); if(!txt){ toast('Load failed'); return; }
   let obj=null; try{ obj=JSON.parse(txt); }catch{ toast('Invalid kit file'); return; }
   if(!ctx){ ctx=new AC(); await ctx.resume(); }
-  currentKit.name = obj.name || "Loaded Kit";
-  for(let i=0;i<16;i++){
-    const pad=obj.pads?.[i]; if(pad && pad.wav){ const buf=await base64WavToBuffer(pad.wav); currentKit.pads[i].buffer=buf; currentKit.pads[i].name=pad.name||currentKit.pads[i].name; }
-    else{ currentKit.pads[i].buffer=null; currentKit.pads[i].name = pad?.name || currentKit.pads[i].name; }
-  }
-  buildPads(); $("#drumPanel").style.display="block"; toast('Kit loaded');
+  await restoreKit(obj); $("#drumPanel").style.display="block"; toast('Kit loaded');
 };
 /* WAV utils */
 async function bufferToBase64Wav(buffer){
@@ -984,7 +1092,6 @@ function buildLooperUI(){
 
     tEl.appendChild(row);
   });
-  // enable export buttons if any track has a buffer
   const anyBuf = looperTracks.some(t=>t.buffer);
   exportMixBtn.disabled = !anyBuf;
   exportStemsBtn.disabled = !anyBuf;
@@ -1003,7 +1110,7 @@ initBtn.addEventListener('click', async ()=>{ await ensureLooperAudioReady(); bu
 async function ensureLooperAudioReady(){
   if(looperAudioReady) return true;
   if(!ctx){ ctx=new AC(); await ctx.resume(); }
-  await ensureInputNodes();
+  await ensureInputNodes(true);
   looperAnalyser = inputAnalyser;
   looperTracks.forEach(tr=>{ if(!tr.gainNode){ const g=ctx.createGain(); g.gain.value=tr.volume; g.connect(masterBus); tr.gainNode=g; } });
   if (!looperMediaRec && window.MediaRecorder){
@@ -1026,7 +1133,6 @@ function startPlayback(){
   looperStartAt=ctx.currentTime;
   looperTracks.forEach(tr=>{
     if(tr.buffer){
-      // always connect through gainNode; do not disconnect for mute/solo
       const src=ctx.createBufferSource(); src.buffer=normalizeToLoop(tr.buffer, looperLoopLenSec);
       src.loop=true; src.loopStart=0; src.loopEnd=looperLoopLenSec; src.connect(tr.gainNode); src.start(); tr.source=src;
     }
@@ -1098,7 +1204,7 @@ function clearTrack(i){
   const t=looperTracks[i];
   if(t.source){ try{ t.source.stop(); }catch{} t.source=null; }
   t.buffer=null;
-  if(t.gainNode){ t.gainNode.gain.value = 0; } // effectively silent
+  if(t.gainNode){ t.gainNode.gain.value = 0; }
   t.statusEl.textContent='—';
   t.progressEl.style.width='0%';
   t.leds.forEach(d=>d.classList.remove('on'));
@@ -1114,7 +1220,6 @@ function tickProgress(){ if(!looperPlaying || !looperLoopLenSec) return; const n
 function fitBufferToLoop(buf, loopLen){
   const mode = fitModeSel.value;
   if(mode==='trim'){ const sr=buf.sampleRate; const want=Math.round(loopLen*sr); const out=ctx.createBuffer(buf.numberOfChannels,want,sr); for(let ch=0;ch<buf.numberOfChannels;ch++){ const i=buf.getChannelData(ch); const o=out.getChannelData(ch); const n=Math.min(want, buf.length); o.set(i.subarray(0,n),0); const F=Math.max(1, Math.floor(0.003*sr)); for(let k=0;k<F;k++){ const t=k/F; o[k]*=t; o[want-1-k]*=t; } } return out; }
-  // simple resample (linear)
   const sr=buf.sampleRate; const outLen=Math.round(loopLen*sr); const out=ctx.createBuffer(buf.numberOfChannels,outLen,sr);
   for(let ch=0; ch<buf.numberOfChannels; ch++){
     const i=buf.getChannelData(ch), o=out.getChannelData(ch); const ratio=buf.length/outLen;
@@ -1132,43 +1237,7 @@ function createFallbackRecorder(sourceNode, ctx){
   }; return rec;
 }
 
-/* Export (Looper) — WAV Mix & Stems via OfflineAudioContext */
-exportMixBtn.addEventListener('click', async ()=>{
-  if(!looperLoopLenSec){ looperLoopLenSec=Math.max(0.5, Number(loopLenInput.value)||2); }
-  const sr = 44100;
-  const off = new OfflineAudioContext(2, Math.ceil(looperLoopLenSec*sr), sr);
-  looperTracks.forEach(t=>{
-    if(!t.buffer) return;
-    const anySolo = looperTracks.some(x=>x.solo);
-    const muted = t.muted || (anySolo && !t.solo);
-    if(muted) return;
-    const src = off.createBufferSource(); src.buffer = normalizeToLoop(t.buffer, looperLoopLenSec);
-    src.loop=false;
-    const g=off.createGain(); g.gain.value=t.volume;
-    src.connect(g).connect(off.destination); src.start(0);
-  });
-  const rendered = await off.startRendering();
-  const wav = audioBufferToWav(rendered);
-  downloadBlob(new Blob([wav], {type:'audio/wav'}), 'LooperMix.wav');
-  toastEl.textContent='Exported mix WAV';
-});
-exportStemsBtn.addEventListener('click', async ()=>{
-  if(!looperLoopLenSec){ looperLoopLenSec=Math.max(0.5, Number(loopLenInput.value)||2); }
-  const sr = 44100;
-  const anySolo = looperTracks.some(x=>x.solo);
-  for(let i=0;i<looperTracks.length;i++){
-    const t = looperTracks[i]; if(!t.buffer) continue;
-    const muted = t.muted || (anySolo && !t.solo); if(muted) continue;
-    const off = new OfflineAudioContext(2, Math.ceil(looperLoopLenSec*sr), sr);
-    const src = off.createBufferSource(); src.buffer = normalizeToLoop(t.buffer, looperLoopLenSec);
-    const g=off.createGain(); g.gain.value=t.volume; src.connect(g).connect(off.destination); src.start(0);
-    const rendered = await off.startRendering(); const wav = audioBufferToWav(rendered);
-    downloadBlob(new Blob([wav], {type:'audio/wav'}), `Stem_${t.label}.wav`);
-  }
-  toastEl.textContent='Exported stems WAV';
-});
-
-/* ====================== Live Export (master) to MP3/OGG/WebM (as supported) ====================== */
+/* ====================== Live Export (master) ====================== */
 const liveTypeSel = $("#liveType"), liveBtn=$("#liveExport");
 let liveMR=null, liveChunks=[];
 function populateLiveTypes(){
@@ -1221,12 +1290,56 @@ function getBestMimeOverall(){
 }
 function mimeToExt(m){ if(!m) return 'webm'; if(m.includes('mpeg')) return 'mp3'; if(m.includes('ogg')) return 'ogg'; if(m.includes('mp4')) return 'm4a'; return 'webm'; }
 
+/* ====================== MIDI Enable & Routing (pads) ====================== */
+midiBtn.addEventListener('click', async ()=>{
+  if(!midiEnabled){
+    try{
+      midiAccess = await navigator.requestMIDIAccess();
+      midiEnabled = true; midiStatus.textContent='MIDI: enabled'; midiBtn.textContent='Disable MIDI';
+      subscribeMidiInputs();
+      toast('MIDI enabled');
+    }catch(e){
+      midiStatus.textContent='MIDI: denied'; toast('MIDI access denied');
+    }
+  }else{
+    unsubscribeMidiInputs(); midiEnabled=false; midiStatus.textContent='MIDI: off'; midiBtn.textContent='Enable MIDI';
+    toast('MIDI disabled');
+  }
+});
+function subscribeMidiInputs(){
+  unsubscribeMidiInputs();
+  midiInputs = Array.from(midiAccess.inputs.values());
+  midiInputs.forEach(input=>{
+    const onmidimessage=(e)=>{
+      const [st,d1,d2]=e.data; const cmd = st & 0xF0;
+      if(cmd===0x90 && d2>0){ // Note On
+        const padIdx = gmNoteToPad(d1);
+        if(padIdx!==null){
+          const v = Math.max(0.1, d2/127);
+          const padEl = padgrid.querySelector(`[data-index="${padIdx}"]`);
+          padEl?.classList.add('on'); setTimeout(()=>padEl?.classList.remove('on'),100);
+          triggerPad(padIdx, v);
+        }
+      }
+      if(cmd===0x80 || (cmd===0x90 && d2===0)){
+        // Note Off (not needed for one-shots)
+      }
+    };
+    input.onmidimessage = onmidimessage;
+    midiUnsubs.push(()=>{ input.onmidimessage=null; });
+  });
+}
+function unsubscribeMidiInputs(){ midiUnsubs.forEach(fn=>fn()); midiUnsubs=[]; }
+function gmNoteToPad(note){
+  // Map GM drums roughly 36..51 to pads 0..15
+  const base=36; if(note<base || note>base+15) return null; return note-base;
+}
+
 /* ====================== Init ====================== */
-function drawLabels(){}
 function init(){ addTrack("audio"); addTrack("audio"); addTrack("drum"); buildPads(); layout(); drawRuler(); }
 init();
 
-/* ===== Helper for metering & loop wait ===== */
+/* ===== Helper for metering ===== */
 function updateTrackLEDs(){
   project.tracks.forEach(t=>{
     const ana=audioMap.get(t.id)?.ana; const led=document.getElementById('led_'+t.id); if(!ana||!led) return;
